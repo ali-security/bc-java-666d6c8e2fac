@@ -1,3 +1,51 @@
 language: java
-jdk:
-  - openjdk8
+dist: jammy
+
+# bcprov-jdk18on is a multi-release jar (java9/11/15/21 source sets compiled
+# with --release N), so the build JVM must be JDK 21, as in upstream ci/test.sh.
+# The bcprov artifact's suites are :core:test and :prov:test; they run as
+# separate jobs so each stays inside the Travis job time limit. :core:test is
+# split into its non-PQC and PQC halves (the build's own excludeTests property
+# and a --tests filter); together they cover the whole core suite.
+env:
+  global:
+    - JAVA_TOOL_OPTIONS=-Dfile.encoding=UTF8
+    - SEAL_JDK_URL=https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.5%2B11/OpenJDK21U-jdk_x64_linux_hotspot_21.0.5_11.tar.gz
+  jobs:
+    - TEST_TASKS=":core:test -PexcludeTests=org.bouncycastle.pqc.*"
+    - TEST_TASKS=":core:test --tests org.bouncycastle.pqc.*"
+    - TEST_TASKS=":prov:test"
+
+before_install:
+  - mkdir -p "$HOME/jdk21" && curl -fsSL "$SEAL_JDK_URL" | tar -xz -C "$HOME/jdk21" --strip-components=1
+  - export JAVA_HOME="$HOME/jdk21" && export PATH="$JAVA_HOME/bin:$PATH" && java -version
+  # Test vectors live in the separate bc-test-data repo; TestResourceFinder walks
+  # up from user.dir looking for a directory named bc-test-data.
+  - mkdir -p "$TRAVIS_BUILD_DIR/../bc-test-data" && curl -fsSL https://codeload.github.com/bcgit/bc-test-data/tar.gz/refs/tags/r1rv80 | tar -xz -C "$TRAVIS_BUILD_DIR/../bc-test-data" --strip-components=1
+  # Print per-test results and a pass/fail count; two test forks on the 2-CPU VM.
+  - >-
+    printf '%s\n'
+    'gradle.projectsEvaluated {'
+    '  gradle.rootProject.allprojects {'
+    '    tasks.withType(Test).configureEach { t ->'
+    '      t.maxParallelForks = 2'
+    '      t.testLogging {'
+    '        events "passed", "skipped", "failed"'
+    '        exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL'
+    '      }'
+    '      t.afterSuite { desc, result ->'
+    '        if (!desc.parent) {'
+    '          println "TEST SUMMARY ${t.path}: ${result.resultType} - ${result.testCount} tests, ${result.successfulTestCount} passed, ${result.failedTestCount} failed, ${result.skippedTestCount} skipped"'
+    '        }'
+    '      }'
+    '    }'
+    '  }'
+    '}'
+    > "$HOME/seal-init.gradle" && cat "$HOME/seal-init.gradle"
+
+install:
+  - ./gradlew --no-daemon --console=plain -s --init-script "$HOME/seal-init.gradle" :prov:jar
+
+script:
+  - (while sleep 300; do echo "still running..."; done) &
+  - ./gradlew --no-daemon --console=plain -s --init-script "$HOME/seal-init.gradle" $TEST_TASKS
